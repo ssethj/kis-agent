@@ -304,6 +304,35 @@ def _getBaseHeader():
     return copy.deepcopy(_base_headers)
 
 
+# 캐시된 토큰을 강제로 제거하여 다음 auth()가 새 토큰을 발급받도록 한다.
+# 서버가 '기간 만료 토큰' 오류를 보고한 경우처럼로컬 캐시가 더 이상 신뢰할 수
+# 없을 때만 사용한다. (KIS는 1일 1회 발급 원칙이지만 서버가 토큰을 먼저 만료
+# 시킨 경우에는 새 발급을 강제해야 복구된다.)
+def clear_token(app_key: str = None) -> None:
+    """Remove a cached token so the next auth() issues a fresh one.
+
+    Args:
+        app_key: 지금 사용 중인 APP_KEY. 제공하면 해당 키 전용 토큰 파일과
+            메모리 캐시를 모두 제거하고, None이면 메모리 캐시만 전체 비운다.
+    """
+    import hashlib
+    import os
+
+    if app_key:
+        key_hash = hashlib.sha256(app_key.encode()).hexdigest()[:16]
+        _token_cache.pop(key_hash, None)
+        path = _get_token_path_for_app_key(app_key)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                _logger.debug(f"캐시 토큰 파일 제거: {path}")
+            except OSError as e:  # pragma: no cover - 파일 제거는 잠깐 실패 가능
+                _logger.warning(f"캐시 토큰 파일 제거 실패: {path} - {e}")
+    else:
+        # 전역 캐시만 비운다 (파일은 건드리지 않는다 — 다른 키 영향 방지)
+        _token_cache.clear()
+
+
 # 가져오기 : 앱키, 앱시크리트, 종합계좌번호(계좌번호 중 숫자8자리), 계좌상품코드(계좌번호 중 숫자2자리), 토큰, 도메인
 def _setTRENV(cfg):
     nt1 = namedtuple(

@@ -14,6 +14,7 @@ from .auth import (
     apply_token_env,
     auth,
     auth_async,
+    clear_token,
     getTREnv,
     read_token,
 )
@@ -452,10 +453,10 @@ class KISClient:
 
                         if is_token_expired:
                             logger.warning(f"[{tr_id}] 토큰 만료 감지. 재발급 시도...")
-                            self._initialize_token()
+                            # 캐시 무시하고 강제 재발급 (stale 토큰 재사용 방지)
+                            self._force_refresh_token()
                             # 헤더 업데이트
-                            env = getTREnv()
-                            headers["authorization"] = env.my_token
+                            self._apply_fresh_token_to_headers(headers)
                             if attempt < retries - 1:
                                 continue  # 토큰 갱신 후 재시도
 
@@ -514,6 +515,23 @@ class KISClient:
                                 f" (API Code in JSON: {http_error_code_from_json})"
                             )
                         logger.warning(log_entry)
+
+                        # [수정] 만료된 토큰은 HTTP 200 뿐 아니라 500으로도 반환된다
+                        # (rt_cd=1, msg1="기간이 만료된 token 입니다."). 이 분기는
+                        # 원래 그냥 재시도만 하고 토큰을 갱신하지 않아, 만료 토큰으로
+                        # 재시도 횟수를 모두 소진한 뒤 최종 실패했다. 만료를 감지하면
+                        # stale 캐시를 버리고 강제 발급한 새 토큰으로 재시도한다.
+                        if self._is_token_expired_response(
+                            data, response.status_code
+                        ):
+                            logger.warning(
+                                f"[{tr_id}] HTTP 오류지만 토큰 만료 감지. "
+                                "토큰 강제 재발급 후 재시도..."
+                            )
+                            self._force_refresh_token()
+                            self._apply_fresh_token_to_headers(headers)
+                            continue  # 토큰 갱신 후 다음 시도로
+
                         if attempt < retries - 1:
                             time.sleep(
                                 0.2
@@ -550,6 +568,66 @@ class KISClient:
             f"[{tr_id}] 최종 실패 후 루프 외부 도달: {last_exception if last_exception else '알 수 없는 오류'}"
         )
         raise Exception("Unknown error after retries")
+
+    def _is_token_expired_response(self, data, status_code: int) -> bool:
+        """Return True if the API body indicates the access token has expired.
+
+        KIS reports token expiry with HTTP 500 (rt_cd=1, msg1="기간이 만료된
+        token 입니다.") as often as with HTTP 200/401.  This helper inspects the
+        JSON body regardless of status so the client can recover in every case.
+        """
+        if not isinstance(data, dict):
+            return False
+        code = data.get("rt_cd")
+        msg = data.get("msg1") or ""
+        if isinstance(code, str) and code in ("EGW00123", "EGW00124"):
+            return True
+        if isinstance(msg, str):
+            # KIS는 영문 "token"도 쓰고 한글 "토큰"도 쓴다 — 둘 다 허용.
+            # 예: "기간이 만료된 token 입니다.", "기간이 만료된 토큰 입니다."
+            lowered = msg.lower()
+            if "만료" in msg and (
+                "token" in lowered or "토큰" in msg
+            ):
+                return True
+        # 401은 대체로 토큰 만료를 의미한다 (요청이 인증전에 거부됨).
+        if status_code == 401:
+            return True
+        return False
+
+    def _force_refresh_token(self) -> None:
+        """Re-issue a fresh token, ignoring any still-cached one.
+
+        The locally stored valid-date is timezone-naive and can look "valid"
+        long after the server has revoked/expired the token (that is exactly
+        what surfaces as a 500 "기간이 만료된 token" response).  So this method
+        deletes the cached token for the current app_key and re-issues —  unlike
+        `_initialize_token`, which would happily reuse the stale token.
+        """
+        app_key = (
+            self.config.APP_KEY
+            if self.config
+            else os.getenv("KIS_APP_KEY", "")
+        )
+        if app_key:
+            try:
+                clear_token(app_key=app_key)
+            except Exception as e:  # pragma: no cover - 정리 실패는 치명적이지 않다
+                logger.warning(f"캐시 토큰 제거 실패, 재발급 진행: {e}")
+        # 인스턴스에 남은 토큰 상태를 버려야 _initialize_token()이 캐시 재사용으로
+        # short-circuit하지 않고 실제로 새 토큰을 발급받는다. (이 상태가 남아 있으면
+        # 이전 만료 토큰을 계속 쓰게 되어 "재발급했는데도 또 500" 되는 원인이 된다.)
+        self.token = None
+        self.token_expired = None
+        self._initialize_token()
+        logger.info("토큰을 강제로 새로 발급했습니다 (기존 캐시 무시).")
+
+    def _apply_fresh_token_to_headers(self, headers: Dict[str, str]) -> None:
+        """Point the outbound headers at the freshly issued token."""
+        env = getTREnv()
+        headers["authorization"] = env.my_token
+        headers["appkey"] = env.my_app
+        headers["appsecret"] = env.my_sec
 
     def refresh_token(self) -> None:
         """
