@@ -111,3 +111,60 @@ def test_zero_retries_rejects_request_without_network_call():
     ) as request, pytest.raises(Exception, match="Unknown error after retries"):
         _request_client().make_request("/test", "TR", {}, retries=0)
     request.assert_not_called()
+
+
+def test_auth_headers_tolerate_missing_token_and_config_attrs():
+    """Lightweight clients without token/config must fall back to getTREnv()."""
+    env = SimpleNamespace(
+        my_token="Bearer env-token", my_app="env-app", my_sec="env-sec"
+    )
+    client = _request_client()  # no token / config attributes
+
+    with patch.object(client_module, "getTREnv", return_value=env):
+        headers = client._auth_headers()
+
+    assert headers == {
+        "authorization": "Bearer env-token",
+        "appkey": "env-app",
+        "appsecret": "env-sec",
+    }
+
+
+def test_auth_headers_prefer_per_client_credentials_over_global_env():
+    """Two clients must keep distinct token/app key/secret despite shared getTREnv()."""
+    leaked = SimpleNamespace(
+        my_token="Bearer leaked-last-agent",
+        my_app="leaked-app",
+        my_sec="leaked-sec",
+    )
+    client_a = _request_client()
+    client_a.token = "token-a"
+    client_a.config = SimpleNamespace(APP_KEY="key-a", APP_SECRET="sec-a")
+    client_b = _request_client()
+    client_b.token = "token-b"
+    client_b.config = SimpleNamespace(APP_KEY="key-b", APP_SECRET="sec-b")
+
+    with patch.object(client_module, "getTREnv", return_value=leaked):
+        headers_a = client_a._auth_headers()
+        headers_b = client_b._auth_headers()
+        # Token refresh path must also re-bind to the same client credentials.
+        client_a.token = "token-a-refreshed"
+        headers_a_refreshed = client_a._auth_headers()
+
+    assert headers_a == {
+        "authorization": "Bearer token-a",
+        "appkey": "key-a",
+        "appsecret": "sec-a",
+    }
+    assert headers_b == {
+        "authorization": "Bearer token-b",
+        "appkey": "key-b",
+        "appsecret": "sec-b",
+    }
+    assert headers_a_refreshed == {
+        "authorization": "Bearer token-a-refreshed",
+        "appkey": "key-a",
+        "appsecret": "sec-a",
+    }
+    assert headers_a["appkey"] != headers_b["appkey"]
+    assert headers_a["authorization"] != leaked.my_token
