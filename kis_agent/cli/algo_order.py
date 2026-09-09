@@ -140,11 +140,11 @@ def cmd_order_algo(args, algorithm: str):
     """
     # main과의 순환 임포트를 피하려고 호출 시점에 가져온다. 속성 조회가 호출
     # 시점에 일어나므로 테스트의 ``kis_agent.cli.main.*`` 패치도 그대로 먹는다.
+    from datetime import datetime
+
     from kis_agent.cli import main as cli_main
     from kis_agent.execution import run_twap, run_vwap
     from kis_agent.execution.journal import find_incomplete_runs
-    from datetime import datetime
-
     from kis_agent.execution.runner import krx_regular_session
     from kis_agent.execution.schedule import (
         build_twap_schedule,
@@ -266,10 +266,12 @@ def cmd_order_algo(args, algorithm: str):
                     f"슬라이스 {len(outside)}개({lost:,}주)가 정규장 밖 — "
                     f"집행되지 않고 유실됩니다"
                 )
-        except ValueError:
+        except ValueError as exc:
             # invalid qty/slices/duration — the runner's own validation
             # reports it properly; the preview must not mask that error
-            pass
+            sys.stderr.write(
+                f"  [{algo_label}] session-overflow preview skipped: {exc}\n"
+            )
 
     if not args.yes and not cli_main._confirm_order(
         f"{algo_label} {side_label}", details
