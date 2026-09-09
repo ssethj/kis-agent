@@ -266,10 +266,12 @@ def cmd_order_algo(args, algorithm: str):
                     f"슬라이스 {len(outside)}개({lost:,}주)가 정규장 밖 — "
                     f"집행되지 않고 유실됩니다"
                 )
-        except ValueError:
+        except ValueError as exc:
             # invalid qty/slices/duration — the runner's own validation
             # reports it properly; the preview must not mask that error
-            pass
+            sys.stderr.write(
+                f"  [{algo_label}] session-overflow preview skipped: {exc}\n"
+            )
 
     if not args.yes and not cli_main._confirm_order(
         f"{algo_label} {side_label}", details
