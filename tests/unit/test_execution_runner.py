@@ -298,6 +298,34 @@ class TestRunVwap:
         )
         assert any("거래량 프로파일" in note for note in result.notes)
 
+    def test_session_overflow_note_is_prepended_for_after_hours_schedule(self):
+        """VWAP must surface the same STO-1731 overflow warning as TWAP."""
+        agent = FakeAgent()
+        after_close = datetime(2026, 8, 21, 16, 0)
+        profile = build_profile_from_bars(
+            {
+                "20260820": [
+                    {"stck_cntg_hour": "100000", "cntg_vol": "100"},
+                    {"stck_cntg_hour": "101000", "cntg_vol": "100"},
+                ]
+            }
+        )
+        result = run_vwap(
+            agent,
+            code="005930",
+            side="buy",
+            quantity=20,
+            duration_minutes=10,
+            slices=2,
+            start=after_close,
+            profile=profile,
+            executor=instant_executor(agent, clock=FastClock(now=after_close)),
+        )
+        assert agent.account_api.orders == []
+        assert any(
+            "정규장" in note and "실행되지 않습니다" in note for note in result.notes
+        )
+
     def test_missing_profile_falls_back_to_even_split_and_says_so(self):
         agent = FakeAgent()
         empty = VolumeProfile(fallback_reason="분봉 없음")
