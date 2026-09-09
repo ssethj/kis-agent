@@ -69,8 +69,6 @@ DEFAULT_CREDIT_TYPE_BUY = "21"  # 신용융자
 DEFAULT_CREDIT_TYPE_SELL = "11"  # 융자상환매도
 
 
-
-
 def _session_overflow_note(
     schedule: List[OrderSlice], restrict_to_session: bool
 ) -> Optional[str]:
