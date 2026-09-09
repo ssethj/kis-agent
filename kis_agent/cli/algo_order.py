@@ -140,11 +140,11 @@ def cmd_order_algo(args, algorithm: str):
     """
     # main과의 순환 임포트를 피하려고 호출 시점에 가져온다. 속성 조회가 호출
     # 시점에 일어나므로 테스트의 ``kis_agent.cli.main.*`` 패치도 그대로 먹는다.
+    from datetime import datetime
+
     from kis_agent.cli import main as cli_main
     from kis_agent.execution import run_twap, run_vwap
     from kis_agent.execution.journal import find_incomplete_runs
-    from datetime import datetime
-
     from kis_agent.execution.runner import krx_regular_session
     from kis_agent.execution.schedule import (
         build_twap_schedule,
