@@ -2,7 +2,117 @@
 
 모든 주목할 만한 변경사항이 이 파일에 문서화됩니다.
 
-## [Unreleased]
+## [1.10.0] - 2026-08-28
+
+### 📢 집행 결과 계약 정직화 (STO-1731) — **호출자(LLM 포함) 영향 확인 필수**
+
+KIS `order_cash`의 `rt_cd == "0"`은 **주문 접수**이지 체결이 아니다. 기존 계약은
+이 둘을 뒤섞어 지정가 미체결 시나리오에서 "체결 완료"로 오독됐다.
+
+**슬라이스 상태 값 변경: `filled` → `accepted`**
+
+- `AlgoSliceStatus.filled`는 제거되고 `accepted`로 대체된다. 의미는 동일하다
+  (주문 접수됨) — 이름만 정직해졌다.
+- 실행 원장(journal) 리더는 구버전 `filled` 레코드도 계속 읽는다.
+- `SLICE_FILLED` 상수는 deprecated alias로 남긴다 (`SLICE_ACCEPTED` 권장).
+
+**dry-run 최상위 상태 변경: `completed` → `simulated`**
+
+- dry-run의 `AlgoOrderStatus`가 더 이상 `completed`로 위장하지 않는다.
+- 종료코드는 여전히 0 (전량 시뮬레이션 = 성공).
+- `dryRun: true` 필드는 유지된다.
+
+**스키마 문구 정정**
+
+- `submittedQuantity`: "실제 집행된 수량" → "주문이 접수된 수량 (체결 아님 —
+  지정가 미체결분 포함. 체결수량은 별도 조회)"
+
+**마감 초과 사전 경고**
+
+- 스케줄이 정규장(09:00-15:30)을 넘으면 확인 프롬프트에 "⚠ 마감 초과"가
+  표시되고(슬라이스 수·유실 수량), `--yes` 경로에서도 `result.notes`에
+  동일 경고가 기록된다. (실측: 15:10 + 30분 TWAP은 33% 유실)
+
+## [1.9.0] - 2026-08-21
+
+### 🛡️ 주문 안전성 (중요)
+
+레드팀 감사에서 나온 치명 2건을 수정했습니다. 알고리즘 주문을 쓰지 않더라도
+**모든 주문 경로에 적용**됩니다.
+
+**주문은 이제 절대 재전송되지 않습니다** (STO-1729)
+
+`KISClient.make_request`는 타임아웃·5xx에 기본 2회까지 재시도했고, 이 정책이
+주문 POST에도 그대로 적용됐습니다. 타임아웃은 *응답*에 걸린 것이지 *동작*에
+걸린 것이 아닙니다 — 거래소에 도달해 접수된 주문의 응답만 유실됐는데 같은
+본문을 다시 보내면 중복 주문이 됩니다. KIS 주문 API는 멱등키를 받지 않아
+거래소가 걸러줄 방법도 없습니다.
+
+이제 GET이 아닌 요청은 `retries` 값과 무관하게 1회로 강제됩니다. 응답이 유실되면
+주문은 실패로 보고되고, 접수 여부는 `kis order list` / `kis trades`로 확인해야
+합니다. 조회 API의 재시도는 그대로입니다.
+
+**집행 원장이 추가됐습니다** (STO-1730)
+
+TWAP/VWAP은 30~120분 블로킹으로 동작합니다. 그 사이 프로세스가 죽으면
+(SIGKILL·절전·OOM·에이전트 타임아웃) 이미 나간 주문번호가 메모리와 함께
+사라졌습니다.
+
+이제 자식 주문은 거래소가 접수를 확인한 **즉시** JSONL 원장에 flush + fsync
+됩니다. 프로세스가 어떻게 죽든 나간 주문은 파일에 남습니다.
+
+```
+~/.kis-agent/executions/20260821/20260821-133000-005930-buy-3f9a2c.jsonl
+```
+
+- 위치는 `--journal-dir` 또는 `KIS_EXECUTION_JOURNAL_DIR`로 변경
+- `result.run_id` / `result.journal_path`, CLI JSON의 `runId` / `journalPath`
+- 진행 출력(stderr)에도 주문번호가 찍힙니다 — 원장이 실패해도 스크롤백에는 남습니다
+- **미완료 집행 가드**: `end` 레코드가 없는 원장(=죽은 실행)이 같은 종목·**같은
+  방향**에 있으면 새 집행을 거부하고 이미 나간 주문번호를 보여줍니다. 반대 방향
+  (청산)은 막지 않습니다. CLI는 `--ignore-incomplete`, Python API는
+  `check_incomplete=False`로 강행합니다 (`IncompleteExecutionError`)
+- 가드가 보여주는 주문번호는 적게 나올 수 있습니다 — 재전송을 하지 않으므로 응답이
+  유실된 주문은 접수됐더라도 `failed`로 기록됩니다. `kis order list`가 정본입니다
+- 정상 완료와 Ctrl+C는 원장을 닫으므로 가드에 걸리지 않습니다. 처리되지 않은
+  즉사(SIGKILL·OOM·하네스 타임아웃)만 걸립니다
+- dry-run 원장은 거래소에 닿지 않으므로 가드 대상이 아닙니다
+
+원장 기록 실패는 주문을 중단시키지 않습니다. 디스크가 찼다고 절반 집행된 부모
+주문을 버리는 것이 더 나쁩니다.
+
+
+### 📈 알고리즘 주문 — TWAP / VWAP (NEW)
+
+대량 주문을 한 번에 던지면 호가를 밀어 올려 체결가가 나빠집니다. 부모 주문을
+시간에 걸쳐 잘게 쪼개 집행하는 모듈을 추가합니다.
+
+```python
+result = agent.twap_order("005930", "buy", quantity=1000, duration_minutes=30)
+result = agent.vwap_order("005930", "buy", quantity=1000, duration_minutes=120)
+```
+
+```bash
+kis order twap 005930 --side buy --qty 1000 --duration 30 --slices 6
+kis order vwap 005930 --side buy --qty 1000 --duration 120 --profile-days 5
+kis order twap 005930 --side buy --qty 1000 --dry-run --pretty
+```
+
+- `kis_agent.execution` — 스케줄링(`schedule.py`), 거래량 프로파일
+  (`volume_profile.py`), 집행 루프(`executor.py`), 진입점(`runner.py`)
+- `Agent.twap_order()` / `Agent.vwap_order()` 파사드
+- CLI `kis order twap` / `kis order vwap`
+- **현금/신용 선택**: `funding="credit"`, `credit_type`, `loan_dt`. 신용 거부 시
+  현금 폴백은 `credit_fallback_to_cash=True`로 **명시적 opt-in**이며, 폴백이
+  일어나면 슬라이스 message에 기록됩니다.
+- **가드**: 지정가 상/하한(`limit_price`, 매수는 초과·매도는 미만 시 스킵),
+  정규장 시간, 연속 실패 중단, `dry_run`
+- **타이밍**: 모노토닉 시계 오프셋 기준 대기 — NTP 보정이나 주문 지연이 남은
+  슬라이스 간격을 왜곡하지 않습니다
+- Ctrl+C 중단 시 예외 대신 부분 집행 결과를 반환합니다
+- VWAP 프로파일은 완료된 과거 세션만 사용하며, 만들지 못하면 균등 분할로
+  내려가되 그 사유를 `result.notes`에 남깁니다 (조용한 강등 없음)
+
 
 ### ⚡ 비동기 인증 (NEW)
 
