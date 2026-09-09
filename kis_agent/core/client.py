@@ -313,10 +313,13 @@ class KISClient:
             Dict[str, str]: auth/appkey/appsecret headers
         """
         env = getTREnv()
-        authorization = f"Bearer {self.token}" if self.token else getattr(env, "my_token", "")
-        if self.config is not None:
-            app_key = self.config.APP_KEY
-            app_secret = self.config.APP_SECRET
+        # Lightweight test helpers may skip full construction; tolerate missing attrs.
+        token = getattr(self, "token", None)
+        config = getattr(self, "config", None)
+        authorization = f"Bearer {token}" if token else getattr(env, "my_token", "")
+        if config is not None:
+            app_key = config.APP_KEY
+            app_secret = config.APP_SECRET
         else:
             app_key = getattr(env, "my_app", "")
             app_secret = getattr(env, "my_sec", "")
@@ -325,7 +328,6 @@ class KISClient:
             "appkey": app_key,
             "appsecret": app_secret,
         }
-
 
     def _get_base_headers(self, tr_id: str) -> Dict[str, str]:
         """
